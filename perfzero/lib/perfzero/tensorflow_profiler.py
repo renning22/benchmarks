@@ -19,45 +19,12 @@ from __future__ import print_function
 
 import logging
 import os
-import sched
+import portpicker
 import threading
 import time
 import traceback
 
 import perfzero.utils as utils
-
-
-def _start_profiler(output_dir):
-  """Start profiler.
-
-  Args:
-    output_dir: log directory to place the profiler data
-  """
-  import tensorflow as tf  # pylint: disable=g-import-not-at-top
-
-  profiler_data_dir = os.path.join(output_dir, 'profiler_data')
-  utils.make_dir_if_not_exist(profiler_data_dir)
-  logging.info('Starting TensorFlow profiler and saving data to dir %s',
-                 profiler_data_dir)
-  try:
-    tf.profiler.experimental.start(profiler_data_dir)
-    logging.info('Started TensorFlow profiler')
-  except Exception:  # pylint: disable=broad-except
-    logging.error('TensorFlow profiler failed to start due to error:\n %s',
-                  traceback.format_exc())
-
-
-def _stop_profiler():
-  """Stop profiler."""
-
-  import tensorflow as tf  # pylint: disable=g-import-not-at-top
-
-  try:
-    tf.profiler.experimental.stop()
-    logging.info('Stopped TensorFlow profiler.')
-  except Exception:  # pylint: disable=broad-except
-    logging.error('TensorFlow profiler failed to stop due to error:\n %s',
-                  traceback.format_exc())
 
 
 class TensorFlowProfiler(object):
@@ -73,56 +40,49 @@ class TensorFlowProfiler(object):
 
     self.profiler_enabled_time_str = profiler_enabled_time_str
     self.output_dir = output_dir
-    self.exit_event = threading.Event()
-    self.scheduler = sched.scheduler(time.time, self._sleep_until_exit)
+    self.port = portpicker.pick_unused_port()
+    self.thread_profiler = threading.Thread(target=self._on_profile)
 
-  def _sleep_until_exit(self, timeout):
-    start_time = time.time()
-    cur_time = time.time()
-    while cur_time - start_time < timeout and not self.exit_event.is_set():
-      time.sleep(min(1, timeout + start_time - cur_time))
-      cur_time = time.time()
+    from tensorflow.python.profiler import profiler_v2 as profiler  # pylint: disable=g-import-not-at-top
+    profiler.start_server(self.port)
+
+
+  def _on_profile(self):
+    if not self.profiler_enabled_time_str:
+        return
+
+    try:
+        delay_ms = 1000 * int(self.profiler_enabled_time_str.split(':')[0].strip())
+        duration_ms = 1000 * int(self.profiler_enabled_time_str.split(':')[1].strip())
+    except ValueError:
+        logging.error('Failed to parse --profiler_enabled_time: %s', self.profiler_enabled_time_str)
+        return
+
+    from tensorflow.python.profiler import profiler_client  # pylint: disable=g-import-not-at-top
+    from tensorflow.python.profiler import profiler_v2 as profiler  # pylint: disable=g-import-not-at-top
+
+    options = profiler.ProfilerOptions(
+      host_tracer_level=2,
+      python_tracer_level=0,
+      device_tracer_level=0,
+      delay_ms=delay_ms,
+    )
+
+    profiler_data_dir = os.path.join(self.output_dir, 'profiler_data')
+    utils.make_dir_if_not_exist(profiler_data_dir)
+    logging.info('Starting TensorFlow profiler and saving data to dir %s',
+                 profiler_data_dir)
+
+    profiler_client.trace('localhost:{}'.format(self.port), profiler_data_dir, duration_ms,
+                        '', 100, options)
+
+    logging.info('Started TensorFlow profiler')
+
 
   def start(self):
     """Schedule start/stop profiler event specified in profiler_enabled_time_str."""
-
-    if not self.profiler_enabled_time_str:
-      return
-
-    last_end_time = -1
-    for time_str in self.profiler_enabled_time_str.split(','):
-      begin_time = int(time_str.split(':')[0].strip())
-      end_time_str = time_str.split(':')[1].strip() if ':' in time_str else None
-      end_time = int(end_time_str) if end_time_str else 365 * 24 * 60 * 60
-      if begin_time <= last_end_time:
-        raise ValueError('begin_time {} is no larger than the last '
-                         'end_time {}'.format(begin_time, last_end_time))
-      if end_time <= begin_time:
-        raise ValueError('end_time {} is no larger than begin_time {}'.format(
-            end_time, begin_time))
-      # 4th positional arg added to support Python2 for the short-term.
-      self.scheduler.enter(begin_time, 1, _start_profiler,
-        argument=(self.output_dir,))
-      self.scheduler.enter(end_time, 1, _stop_profiler, ())  # pylint: disable=no-value-for-parameter
-      last_end_time = end_time
-
-    threading.Thread(target=self.scheduler.run).start()
+    self.thread_profiler.start()
 
   def stop(self):
     """Stop scheduler and save profiler data if any event is cancelled."""
-
-    event_canceled = False
-    for event in self.scheduler.queue:
-      try:
-        self.scheduler.cancel(event)
-        event_canceled = True
-      except ValueError:
-        # This is OK because the event may have been just canceled
-        pass
-
-    # Signal the scheduler thread to stop sleeping
-    self.exit_event.set()
-
-    # Save the profiler data if any event is canceled
-    if event_canceled:
-      _stop_profiler()
+    self.thread_profiler.join()

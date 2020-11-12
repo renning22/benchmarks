@@ -240,11 +240,9 @@ def add_benchmark_parser_arguments(parser):
       '--profiler_enabled_time',
       default=None,
       type=str,
-      help='''A string of format begin_time_1:end_time_1,begin_time_2:end_time_2,.... PerfZero will start to collect profiler
-      data ${begin_time} sec after benchmark method execution starts. The data collection continues for ${end_time - begin_time}
-      sec or until the benchmark method execution finishes, whichever occurs first. If ${end_time} is not explicitly
-      specified, it is assumed to be MAX_LONG.
-      ''')
+      help='''A string of format "{delay_sec}:{duration_sec}". PerfZero will start to collect profiler
+      data at ${delay_sec} after benchmark method execution starts. The data collection continues for ${duration_sec}
+      or until the benchmark method execution finishes, whichever occurs first.''')
   parser.add_argument(
       '--execution_id',
       default=None,
@@ -343,7 +341,7 @@ class PerfZeroConfig(object):
       if value is not None:
         not_none_flags[key] = value
     return not_none_flags
-  
+
   def get_git_repos(self, site_packages_dir):
     """Parse git repository string."""
     git_repos = []
